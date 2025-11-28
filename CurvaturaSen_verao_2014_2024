@@ -1,0 +1,94 @@
+# --- Instalar pacotes necessários ---
+!pip install rasterio
+!pip install numpy
+!pip install matplotlib
+!pip install scipy
+
+# --- Montar o Google Drive ---
+from google.colab import drive
+drive.mount('/content/drive')
+
+# --- Bibliotecas ---
+import os
+import numpy as np
+import rasterio
+from rasterio.plot import show
+import matplotlib.pyplot as plt
+from glob import glob
+from scipy.stats import linregress
+
+# --- Caminho para as imagens ---
+base_path = '/content/drive/My Drive/MESTRADO/01. DADOS/GEE_LST_Verao_RJ_L8'
+
+# Lista os arquivos com padrão "mediana_verao_L8_YYYY.tif" de 2014 a 2024
+tif_files = sorted(glob(os.path.join(base_path, 'mediana_verao_L8_*.tif')))
+
+# Adicionar uma verificação para garantir que arquivos foram encontrados
+if not tif_files:
+    print(f"Erro: Nenhum arquivo .tif encontrado no caminho: {base_path} com o padrão 'mediana_verao_L8_*.tif'")
+else:
+    # Carrega os dados em um array 3D (tempo, altura, largura)
+    stack = []
+    # Initialise src to None before the loop
+    src = None
+    for tif in tif_files:
+        with rasterio.open(tif) as src:
+            stack.append(src.read(1))
+
+    # Check if src was successfully assigned in the loop
+    if src is None:
+        print("Erro: Não foi possível abrir nenhum arquivo GeoTIFF.")
+    else:
+        meta = src.meta.copy()
+
+        stack_array = np.stack(stack, axis=0)  # shape: (tempo, altura, largura)
+        all_years = np.arange(2014, 2014 + stack_array.shape[0]) # Generate years based on stack size
+
+
+        # --- Função para calcular a Curvatura de Sen (estimativa da inclinação) ---
+        def calculate_sen_slope(pixel_series, years):
+            mask = ~np.isnan(pixel_series)
+            x = years[mask]
+            y = pixel_series[mask]
+
+            if len(y) < 2:
+                return np.nan
+
+            # Usando regressão linear como aproximação de Sen's slope
+            slope, _, _, _, _ = linregress(x, y)
+            return slope
+
+        # --- Aplicar função em cada pixel ---
+        def apply_sen_slope(stack_array, years):
+            time_len, rows, cols = stack_array.shape
+            output = np.full((rows, cols), np.nan, dtype=np.float32)
+
+            for i in range(rows):
+                for j in range(cols):
+                    pixel_series = stack_array[:, i, j]
+                    if np.all(np.isnan(pixel_series)):
+                        continue
+                    output[i, j] = calculate_sen_slope(pixel_series, years)
+
+            return output
+
+        # --- Rodar cálculo de Sen's slope ---
+        print("Calculando a Curvatura de Sen por pixel...")
+        sen_slope_result = apply_sen_slope(stack_array, all_years)
+
+        # --- Visualizar o resultado ---
+        plt.figure(figsize=(10, 6))
+        plt.title("Curvatura de Sen - Temperatura de Superfície no Verão (2014–2024) (°C/ano)")
+        plt.imshow(sen_slope_result, cmap='RdYlBu_r')
+        plt.colorbar(label='°C/ano')
+        plt.show()
+
+        # --- Salvar GeoTIFF ---
+        meta.update(dtype=rasterio.float32, count=1)
+
+        output_path = os.path.join(base_path, 'Curvatura_Sen_Verao_L8.tif')
+
+        with rasterio.open(output_path, 'w', **meta) as dst:
+            dst.write(sen_slope_result, 1)
+
+        print(f"Arquivo salvo em: {output_path}")
