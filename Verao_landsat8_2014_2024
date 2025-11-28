@@ -1,0 +1,274 @@
+// ================================================== //
+// ==== PARTE 1: CARREGAR E PROCESSAR DADOS LST ===== //
+// ================================================== //
+
+// --- Definição da Área de Estudo (Rio de Janeiro) ---
+var rio = ee.FeatureCollection("users/lhonorio97/RIo"); 
+Map.centerObject(rio, 10);
+Map.addLayer(rio, {color: 'red', fillColor: '00000000'}, 'Limite Município RJ');
+
+// --- Definição das Áreas de Planejamento (APs) ---
+var APRJ = 'projects/ee-lhonorio97/assets/AP'; 
+var AP = ee.FeatureCollection(APRJ);
+Map.addLayer(AP, {color: 'gray', fillColor: '00000000'}, 'Áreas de Planejamento');
+
+// --- Funções Auxiliares --- 
+function mascararNuvens(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 5);
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBand = image.select('ST_B10').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBand, null, true)
+              .updateMask(mask);
+}
+
+function calcularLST(image) {
+  var Tb = image.select('ST_B10');
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  var fvc = ndvi.expression(
+      '((ndvi - ndvi_min) / (ndvi_max - ndvi_min))**2',
+      {'ndvi': ndvi, 'ndvi_min': 0.2, 'ndvi_max': 0.5}
+  ).clamp(0, 1).rename('FVC');
+  var em = fvc.multiply(0.004).add(0.986).rename('EM');
+  var lst = image.expression(
+      '(Tb / (1 + (0.00115 * Tb / 1.4388) * log(em))) - 273.15',
+      {'Tb': Tb, 'em': em}
+  ).rename('LST');
+  return image.addBands(lst).clip(rio);
+}
+
+// --- Processamento da Coleção de Imagens (Verão) ---
+var anos = ee.List.sequence(2013, 2022); 
+
+var colecaoVerao = ee.ImageCollection(
+  anos.map(function(ano) {
+    ano = ee.Number(ano);
+    var inicioVerao = ee.Date.fromYMD(ano, 12, 21); 
+    var fimVerao = ee.Date.fromYMD(ano.add(1), 3, 20); 
+    var colecaoAnual = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+      .filterBounds(rio)
+      .filterDate(inicioVerao, fimVerao)
+      .filter(ee.Filter.lt('CLOUD_COVER', 50))
+      .map(mascararNuvens)
+      .map(calcularLST);
+    var medianaAnual = colecaoAnual.select('LST').median()
+                         .set('year', ano.add(1))
+                         .set('image_count', colecaoAnual.size());
+    var imagemVazia = ee.Image().rename('LST') 
+                        .set('year', ano.add(1))
+                        .set('image_count', 0)
+                        .updateMask(0);
+    return ee.Algorithms.If(colecaoAnual.size().gt(0), medianaAnual, imagemVazia);
+  })
+).filter(ee.Filter.gt('image_count', 0));
+
+// --- Inclusão da imagem de 2024 (Landsat 9, 17/03/2024) ---
+var inicio2024 = ee.Date('2024-03-17');
+var fim2024 = ee.Date('2024-03-18');
+var colecao2024_L9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+  .filterBounds(rio)
+  .filterDate(inicio2024, fim2024)
+  .filter(ee.Filter.lt('CLOUD_COVER', 50))
+  .map(mascararNuvens)
+  .map(calcularLST);
+var imagem2024_L9 = colecao2024_L9.select('LST').median()
+  .set('year', 2024)
+  .set('image_count', colecao2024_L9.size());
+
+// --- União das coleções (2014–2023 L8 + 2024 L9) ---
+var colecaoCompleta = colecaoVerao.merge(ee.ImageCollection([imagem2024_L9]))
+  .select('LST');
+
+// --- Inclusão manual da imagem Landsat 8 específica (25/03/2018) ---
+var imagem2018_forcada = ee.Image("LANDSAT/LC08/C02/T1_L2/LC08_217076_20180325")
+  .clip(rio);
+imagem2018_forcada = mascararNuvens(imagem2018_forcada);
+imagem2018_forcada = calcularLST(imagem2018_forcada)
+  .select('LST')
+  .set('year', 2018)
+  .set('forced', true)
+  .set('source', 'LC08_L2SP_217076_20180325_20200901_02_T1');
+
+// --- Substitui qualquer imagem de 2018 existente pela forçada ---
+var colecaoSem2018 = colecaoCompleta.filter(ee.Filter.neq('year', 2018));
+var colecaoCompletaAtualizada = colecaoSem2018.merge(
+  ee.ImageCollection([imagem2018_forcada])
+);
+
+// --- Visualização direta da imagem 2018 forçada ---
+var visLST = {min: 15, max: 45, palette: ["0000FF", "FFFFFF", "FF0000"]};
+Map.addLayer(imagem2018_forcada, visLST, 'LST Forçada 25/03/2018');
+
+// ================================================== //
+// ==== PARTE 2: CÁLCULO DA MEDIANA GERAL E VIS ===== //
+// ================================================== //
+
+var medianaLSTGeral = colecaoCompletaAtualizada.median().clip(rio);
+Map.addLayer(medianaLSTGeral, visLST, 'Mediana LST Verão (2014-2024)');
+
+Export.image.toDrive({
+  image: medianaLSTGeral,
+  description: 'Mediana_LST_Verao_2014_2024',
+  folder: 'GEE_LST_Verao_RJ',
+  fileNamePrefix: 'mediana_lst_verao_2014_2024',
+  region: rio.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// ================================================== //
+// ==== PARTE 3: SÉRIE TEMPORAL (MÉDIA GERAL) ======= //
+// ================================================== //
+
+var serieTemporalMedia = colecaoCompletaAtualizada.map(function(image) {
+  var media = image.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: rio.geometry(), scale: 90, maxPixels: 1e10, tileScale: 4
+  }).get('LST');
+  return ee.Feature(null, {'year': image.get('year'), 'LST_media': ee.Number(media)});
+}).filter(ee.Filter.notNull(['LST_media']));
+
+var graficoMedia = ui.Chart.feature.byFeature({
+  features: serieTemporalMedia, xProperty: 'year', yProperties: ['LST_media']
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Média da LST de Verão no Rio de Janeiro (2014-2024)',
+    hAxis: {title: 'Ano', format: '####'}, vAxis: {title: 'LST Média (°C)'},
+    lineWidth: 2, pointSize: 4, colors: ['#d62728'], curveType: 'function'
+  });
+print(graficoMedia);
+
+// ================================================== //
+// ==== PARTE 4: SÉRIE TEMPORAL POR AP ============= //
+// ================================================== //
+
+var serieTemporalAP = ui.Chart.image.seriesByRegion({
+  imageCollection: colecaoCompletaAtualizada, regions: AP, reducer: ee.Reducer.mean(),
+  band: 'LST', scale: 90, 
+  xProperty: 'year',
+  seriesProperty: 'codap'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Média da LST de Verão por Área de Planejamento (2014-2024)',
+    hAxis: {title: 'Ano', format: '####'},
+    vAxis: {title: 'LST Média (°C)'},
+    lineWidth: 2, pointSize: 4, curveType: 'function'
+  });
+print(serieTemporalAP);
+
+// ================================================== //
+// ==== PARTE 5: BOXPLOT LST MEDIANA POR AP ========= //
+// ================================================== //
+
+var redutoresBoxplot = ee.Reducer.min()
+  .combine(ee.Reducer.percentile([25]).setOutputs(['p25']), null, true)
+  .combine(ee.Reducer.median().setOutputs(['median']), null, true)
+  .combine(ee.Reducer.percentile([75]).setOutputs(['p75']), null, true)
+  .combine(ee.Reducer.max().setOutputs(['max']), null, true);
+
+var statsAP = medianaLSTGeral.reduceRegions({
+  collection: AP, reducer: redutoresBoxplot, scale: 90, tileScale: 4
+});
+
+print('Estatísticas para Boxplot por AP (Mediana LST 2014-2024):', statsAP);
+
+var graficoBoxplotGEE = ui.Chart.feature.byFeature({
+  features: statsAP,
+  xProperty: 'codap',
+  yProperties: ['min', 'p25', 'p75', 'max']
+}).setChartType('CandlestickChart')
+  .setOptions({
+    title: 'Distribuição da LST Mediana por AP (Verão 2014-2024)',
+    hAxis: {title: 'Área de Planejamento (codap)'}, vAxis: {title: 'LST Mediana (°C)'},
+    legend: 'none',
+    candlestick: {
+      fallingColor: { strokeWidth: 0, fill: '#a52714' }, 
+      risingColor: { strokeWidth: 1, stroke: '#0f9d58', fill: '#0f9d58' } 
+    }
+  });
+print(graficoBoxplotGEE);
+
+Export.table.toDrive({
+  collection: statsAP,
+  description: 'Estatisticas_LST_Mediana_por_AP_Verao',
+  folder: 'GEE_LST_Verao_RJ',
+  fileNamePrefix: 'stats_lst_ap_verao',
+  fileFormat: 'CSV'
+});
+
+// ================================================== //
+// ==== PARTE 6: EXPORTAR IMAGENS ANUAIS PARA R ===== //
+// ================================================== //
+
+var imageList = colecaoCompletaAtualizada.toList(colecaoCompletaAtualizada.size());
+var yearsList = colecaoCompletaAtualizada.aggregate_array('year').getInfo();
+
+print('>>> Configurando Tarefas de Exportação das IMAGENS (Execute na aba Tasks) <<<');
+for (var i = 0; i < yearsList.length; i++) {
+  var ano = yearsList[i];
+  var image = ee.Image(imageList.get(i));
+  var nomeArquivo = (ano === 2024 ? 'mediana_verao_L9_' : 'mediana_verao_L8_') + ano;
+  
+  Export.image.toDrive({
+    image: image.select('LST'), description: nomeArquivo, 
+    folder: 'GEE_LST_Verao_RJ', fileNamePrefix: nomeArquivo,
+    region: rio.geometry(), scale: 30, crs: 'EPSG:4326', maxPixels: 1e10
+  });
+  print('Tarefa de IMAGEM configurada para exportar:', nomeArquivo);
+}
+print('>>> Todas as tarefas de exportação (IMAGENS e TABELA) configuradas. Execute-as na aba Tasks. <<<');
+
+// ================================================== //
+// ==== EXPORTAR CSV COM DATAS DAS IMAGENS (VERÃO) == //
+// ================================================== //
+
+var dadosDatasVerao = ee.List.sequence(2013, 2022).map(function(ano) {
+  var inicio = ee.Date.fromYMD(ano, 12, 21);
+  var fim = ee.Date.fromYMD(ee.Number(ano).add(1), 3, 20);
+  var imagens = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(rio)
+    .filterDate(inicio, fim)
+    .filter(ee.Filter.lt('CLOUD_COVER', 50))
+    .map(mascararNuvens)
+    .map(calcularLST);
+  var datas = imagens.aggregate_array('system:time_start')
+    .map(function(d) { return ee.Date(d).format('YYYY-MM-dd'); });
+  return ee.Feature(null, {
+    'year': ee.Number(ano).add(1),
+    'image_count': imagens.size(),
+    'dates': datas
+  });
+});
+
+// --- Inclusão do ano de 2018 forçado ---
+var datas2018 = ee.List(['2018-03-25']);
+var feature2018 = ee.Feature(null, {
+  'year': 2018,
+  'image_count': 1,
+  'dates': datas2018
+});
+
+// --- Inclusão do ano de 2024 (Landsat 9) ---
+var datas2024 = colecao2024_L9.aggregate_array('system:time_start')
+  .map(function(d) { return ee.Date(d).format('YYYY-MM-dd'); });
+var feature2024 = ee.Feature(null, {
+  'year': 2024,
+  'image_count': colecao2024_L9.size(),
+  'dates': datas2024
+});
+
+var tabelaDatasVerao = ee.FeatureCollection(dadosDatasVerao)
+  .merge(ee.FeatureCollection([feature2018, feature2024]));
+
+Export.table.toDrive({
+  collection: tabelaDatasVerao,
+  description: 'Datas_LST_Imagens_Verão',
+  folder: 'GEE_LST_Verao_RJ',
+  fileNamePrefix: 'datas_lst_verao',
+  fileFormat: 'CSV'
+});
