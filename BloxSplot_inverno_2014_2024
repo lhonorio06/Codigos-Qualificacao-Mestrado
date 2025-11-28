@@ -1,0 +1,61 @@
+# --- Instalar bibliotecas necessárias ---
+!pip install pandas
+!pip install seaborn
+!pip install matplotlib
+!pip install numpy
+
+# --- Montar Google Drive ---
+from google.colab import drive
+drive.mount('/content/drive')
+
+# --- Bibliotecas ---
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+# --- Caminho do arquivo CSV ---
+base_path = '/content/drive/My Drive/MESTRADO/01. DADOS/GEE_LST_Inverno_RJ_L8'
+csv_path = os.path.join(base_path, 'stats_lst_ap_inverno.csv')
+
+# --- Leitura do CSV ---
+df = pd.read_csv(csv_path)
+
+# --- Simular distribuição com base nos percentis ---
+# Vamos criar uma amostra fictícia por distrito usando p25, median, p75
+dados_simulados = []
+
+for _, row in df.iterrows():
+    # Modifica o label para "AP" em vez de "Distrito"
+    distrito = f"AP {int(row['codap'])}"
+
+    # Simula 100 valores entre os percentis usando distribuição triangular
+    amostra = np.random.triangular(left=row['p25'], mode=row['median'], right=row['p75'], size=100)
+
+    for valor in amostra:
+        dados_simulados.append({'Distrito': distrito, 'Temperatura': valor})
+
+# --- Criar DataFrame final para o boxplot ---
+df_plot = pd.DataFrame(dados_simulados)
+
+# --- Criar gráfico boxplot ---
+plt.figure(figsize=(10, 6))
+sns.set_theme(style="whitegrid")
+
+# Alterar 'codap' para 'Distrito' para o eixo x, pois essa é a coluna existente em df_plot
+grafico = sns.boxplot(data=df_plot, x='Distrito', y='Temperatura', palette='Set2')
+
+plt.title("Variabilidade de LST de Inverno por Área de Planejamento - Rio de Janeiro (RJ)", fontsize=14)
+plt.xlabel("Área de Planejamento") # Altera o label do eixo X
+plt.ylabel("Temperatura (°C)")
+plt.ylim(20, 35) # Altera o intervalo do eixo Y
+
+sns.despine()
+
+# --- Salvar o gráfico como PNG ---
+output_path = os.path.join(base_path, 'grafico_bloxspot_inverno_L8.png')
+plt.savefig(output_path, dpi=300, bbox_inches='tight', format='png')
+
+print(f"Gráfico salvo em: {output_path}")
+plt.show()
