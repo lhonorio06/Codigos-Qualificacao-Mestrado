@@ -1,0 +1,231 @@
+// ================================================== //
+// ==== PARTE 1: CARREGAR E PROCESSAR DADOS LST ===== //
+// ================================================== //
+
+var rio = ee.FeatureCollection("users/lhonorio97/RIo"); 
+Map.centerObject(rio, 10);
+Map.addLayer(rio, {color: 'red', fillColor: '00000000'}, 'Limite Município RJ');
+
+var APRJ = 'projects/ee-lhonorio97/assets/AP';
+var AP = ee.FeatureCollection(APRJ);
+Map.addLayer(AP, {color: 'gray', fillColor: '00000000'}, 'Áreas de Planejamento');
+
+// --- Funções Auxiliares ---
+function mascararNuvens(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 5);
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBand = image.select('ST_B10').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBand, null, true)
+              .updateMask(mask);
+}
+
+function calcularLST(image) {
+  var Tb = image.select('ST_B10');
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  var fvc = ndvi.expression(
+      '((ndvi - ndvi_min) / (ndvi_max - ndvi_min))**2',
+      {'ndvi': ndvi, 'ndvi_min': 0.2, 'ndvi_max': 0.5}
+  ).clamp(0, 1).rename('FVC');
+  var em = fvc.multiply(0.004).add(0.986).rename('EM');
+  var lst = image.expression(
+      '(Tb / (1 + (0.00115 * Tb / 1.4388) * log(em))) - 273.15',
+      {'Tb': Tb, 'em': em}
+  ).rename('LST');
+  return image.addBands(lst).clip(rio);
+}
+
+// --- Processamento da Coleção de Imagens (Inverno) ---
+var anos = ee.List.sequence(2014, 2024);
+
+var colecaoInverno = ee.ImageCollection(
+  anos.map(function(ano) {
+    var inicioInverno = ee.Date.fromYMD(ano, 6, 1);
+    var fimInverno = ee.Date.fromYMD(ano, 9, 23);
+    
+    var colecaoAnual = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+      .filterBounds(rio)
+      .filterDate(inicioInverno, fimInverno)
+      .filter(ee.Filter.lt('CLOUD_COVER', 50))
+      .map(mascararNuvens)
+      .map(calcularLST);
+
+    var medianaAnual = colecaoAnual.select('LST').median()
+                         .set('year', ano)
+                         .set('image_count', colecaoAnual.size());
+                         
+    var imagemVazia = ee.Image().rename('LST')
+                        .set('year', ano)
+                        .set('image_count', 0)
+                        .updateMask(0);
+                        
+    return ee.Algorithms.If(colecaoAnual.size().gt(0), 
+                            medianaAnual, 
+                            imagemVazia);
+  })
+).filter(ee.Filter.gt('image_count', 0)).select('LST');
+
+print('Coleção de Inverno Processada:', colecaoInverno);
+
+// ================================================== //
+// ==== PARTE 2: MEDIANA GERAL E VISUALIZAÇÃO ======= //
+// ================================================== //
+
+var medianaLSTGeral = colecaoInverno.median().clip(rio);
+var visLST = {min: 15, max: 45, palette: ["0000FF", "FFFFFF", "FF0000"]};
+Map.addLayer(medianaLSTGeral, visLST, 'Mediana LST Inverno (2014-2024)');
+
+Export.image.toDrive({
+  image: medianaLSTGeral,
+  description: 'Mediana_LST_Inverno_2014_2024',
+  folder: 'GEE_LST_Inverno_RJ',
+  fileNamePrefix: 'mediana_lst_inverno_2014_2024',
+  region: rio.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+
+// ================================================== //
+// ==== PARTE 3: SÉRIE TEMPORAL (MÉDIA GERAL) ======= //
+// ================================================== //
+
+var serieTemporalMedia = colecaoInverno.map(function(image) {
+  var media = image.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: rio.geometry(), scale: 90, maxPixels: 1e10, tileScale: 4
+  }).get('LST');
+  return ee.Feature(null, {'year': image.get('year'), 'LST_media': ee.Number(media)});
+}).filter(ee.Filter.notNull(['LST_media']));
+
+var graficoMedia = ui.Chart.feature.byFeature({
+  features: serieTemporalMedia, xProperty: 'year', yProperties: ['LST_media']
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Média da LST de Inverno no Rio de Janeiro (2014-2024)',
+    hAxis: {title: 'Ano', format: '####'}, vAxis: {title: 'LST Média (°C)'},
+    lineWidth: 2, pointSize: 4, colors: ['#1f77b4'], curveType: 'function'
+  });
+print(graficoMedia);
+
+// ================================================== //
+// ==== PARTE 4: SÉRIE TEMPORAL POR AP ============= //
+// ================================================== //
+
+var serieTemporalAP = ui.Chart.image.seriesByRegion({
+  imageCollection: colecaoInverno, regions: AP, reducer: ee.Reducer.mean(),
+  band: 'LST', scale: 90, 
+  xProperty: 'year', 
+  seriesProperty: 'codap'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Média da LST de Inverno por Área de Planejamento (2014-2024)',
+    hAxis: {title: 'Ano', format: '####'},
+    vAxis: {title: 'LST Média (°C)'},
+    lineWidth: 2, pointSize: 4, curveType: 'function'
+  });
+print(serieTemporalAP);
+
+// ================================================== //
+// ==== PARTE 5: BOXPLOT LST MEDIANA POR AP ========= //
+// ================================================== //
+
+var redutoresBoxplot = ee.Reducer.min()
+  .combine(ee.Reducer.percentile([25]).setOutputs(['p25']), null, true)
+  .combine(ee.Reducer.median().setOutputs(['median']), null, true)
+  .combine(ee.Reducer.percentile([75]).setOutputs(['p75']), null, true)
+  .combine(ee.Reducer.max().setOutputs(['max']), null, true);
+
+var statsAP = medianaLSTGeral.reduceRegions({
+  collection: AP, reducer: redutoresBoxplot, scale: 90, tileScale: 4
+});
+
+print('Estatísticas para Boxplot por AP (Mediana LST Inverno):', statsAP);
+
+var graficoBoxplotGEE = ui.Chart.feature.byFeature({
+  features: statsAP,
+  xProperty: 'codap',
+  yProperties: ['min', 'p25', 'p75', 'max']
+}).setChartType('CandlestickChart')
+  .setOptions({
+    title: 'Distribuição da LST Mediana por AP (Inverno 2014-2024)',
+    hAxis: {title: 'Área de Planejamento (codap)'}, vAxis: {title: 'LST Mediana (°C)'},
+    legend: 'none',
+    candlestick: {
+      fallingColor: { strokeWidth: 0, fill: '#a52714' }, 
+      risingColor: { strokeWidth: 1, stroke: '#0f9d58', fill: '#0f9d58' } 
+    }
+  });
+print('Gráfico (Aproximação Boxplot) LST Mediana por AP:', graficoBoxplotGEE);
+
+// Exportar estatísticas para Drive
+Export.table.toDrive({
+  collection: statsAP,
+  description: 'Estatisticas_LST_Mediana_por_AP_Inverno',
+  folder: 'GEE_LST_Inverno_RJ',
+  fileNamePrefix: 'stats_lst_ap_inverno',
+  fileFormat: 'CSV'
+});
+print('>>> Tarefa de exportação da TABELA de estatísticas por AP configurada (ver aba Tasks) <<<');
+
+// ================================================== //
+// ==== PARTE 6: EXPORTAR IMAGENS ANUAIS PARA R ===== //
+// ================================================== //
+
+var imageList = colecaoInverno.toList(colecaoInverno.size());
+var yearsList = colecaoInverno.aggregate_array('year').getInfo();
+
+print('>>> Configurando Tarefas de Exportação das IMAGENS (Execute na aba Tasks) <<<');
+for (var i = 0; i < yearsList.length; i++) {
+  var ano = yearsList[i];
+  var image = ee.Image(imageList.get(i));
+  var nomeArquivo = 'mediana_inverno_L8_' + ano;
+  
+  Export.image.toDrive({
+    image: image.select('LST'), description: nomeArquivo, 
+    folder: 'GEE_LST_Inverno_RJ', fileNamePrefix: nomeArquivo,
+    region: rio.geometry(), scale: 30, crs: 'EPSG:4326', maxPixels: 1e10
+  });
+  print('Tarefa de IMAGEM configurada para exportar:', nomeArquivo);
+}
+print('>>> Todas as tarefas de exportação (IMAGENS e TABELA) configuradas. Execute-as na aba Tasks. <<<');
+
+// ================================================== //
+// ==== EXPORTAR CSV COM DATAS DAS IMAGENS (INVERNO) =//
+// ================================================== //
+
+var dadosDatasInverno = ee.List.sequence(2014, 2024).map(function(ano) {
+  var inicio = ee.Date.fromYMD(ano, 6, 1);
+  var fim = ee.Date.fromYMD(ano, 9, 23);
+
+  var imagens = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(rio)
+    .filterDate(inicio, fim)
+    .filter(ee.Filter.lt('CLOUD_COVER', 50))
+    .map(mascararNuvens)
+    .map(calcularLST);
+    
+  var datas = imagens.aggregate_array('system:time_start')
+    .map(function(d) { return ee.Date(d).format('YYYY-MM-dd'); });
+
+  return ee.Feature(null, {
+    'year': ano,
+    'image_count': imagens.size(),
+    'dates': datas
+  });
+});
+
+var tabelaDatasInverno = ee.FeatureCollection(dadosDatasInverno);
+
+Export.table.toDrive({
+  collection: tabelaDatasInverno,
+  description: 'Datas_LST_Imagens_Inverno',
+  folder: 'GEE_LST_Inverno_RJ',
+  fileNamePrefix: 'datas_lst_inverno',
+  fileFormat: 'CSV'
+});
