@@ -1,0 +1,115 @@
+# --- 1. Instalação de pacotes ---
+!pip install rasterio numpy matplotlib pymannkendall
+
+# --- 2. Bibliotecas ---
+import os
+import numpy as np
+import rasterio
+import matplotlib.pyplot as plt
+import pymannkendall as mk
+from glob import glob
+from google.colab import drive
+
+# --- 3. Montar o Google Drive ---
+drive.mount('/content/drive')
+
+# --- 4. Caminho para as imagens de Inverno ---
+base_path = '/content/drive/MyDrive/LST_RJ_Inverno_2000_2013/'
+
+def executar_mann_kendall_inverno(termo_busca, nome_saida_final):
+    """
+    termo_busca: Palavra-chave para filtrar (ex: 'FULL' ou 'URBANA')
+    nome_saida_final: Nome que aparecerá no arquivo salvo
+    """
+    print(f"\n" + "="*60)
+    print(f"INICIANDO MANN-KENDALL INVERNO: {nome_saida_final}")
+    print("="*60)
+
+    # --- 5. Lista de arquivos com busca flexível ---
+    # Pega todos os .tif e filtra por BOM/RESGATE + o termo de busca (FULL/URBANA)
+    todos_arquivos = glob(os.path.join(base_path, "*.tif"))
+
+    tif_files = []
+    for f in todos_arquivos:
+        nome_f = os.path.basename(f).upper()
+        if (termo_busca.upper() in nome_f) and ("BOM" in nome_f or "RESGATE" in nome_f):
+            tif_files.append(f)
+
+    tif_files = sorted(tif_files)
+
+    if not tif_files:
+        print(f"❌ Erro: Nenhum arquivo de Inverno encontrado para {termo_busca} (BOM/RESGATE).")
+        return
+
+    print(f"Arquivos encontrados ({len(tif_files)}): {[os.path.basename(f) for f in tif_files]}")
+
+    # --- 6. Carregar imagens como array 3D ---
+    stack = []
+    src_meta = None
+
+    for tif in tif_files:
+        with rasterio.open(tif) as src_file:
+            img = src_file.read(1).astype(np.float32)
+            # Tratamento de Nulos: Valores <= 0 (máscaras/nuvens)
+            img[img <= 0] = np.nan
+            stack.append(img)
+            if src_meta is None:
+                src_meta = src_file.meta.copy()
+
+    stack_array = np.stack(stack, axis=0)
+    time_len, rows, cols = stack_array.shape
+
+    # --- 7. Funções de Cálculo ---
+    def calc_kendall_tau(pixel_series):
+        valid_series = pixel_series[~np.isnan(pixel_series)]
+        # Requisito mínimo de 5 anos para validade estatística
+        if len(valid_series) < 5:
+            return np.nan
+        try:
+            result = mk.original_test(valid_series)
+            return result.Tau
+        except:
+            return np.nan
+
+    def apply_mann_kendall(array_3d):
+        output = np.full((rows, cols), np.nan, dtype=np.float32)
+        print(f"Processando {rows} linhas...")
+
+        for i in range(rows):
+            if i % 100 == 0: print(f"Linha {i} de {rows}...")
+            for j in range(cols):
+                pixel_series = array_3d[:, i, j]
+                if np.all(np.isnan(pixel_series)):
+                    continue
+                output[i, j] = calc_kendall_tau(pixel_series)
+        return output
+
+    # --- 8. Rodar análise ---
+    print("Calculando Tau de Kendall pixel a pixel (Inverno)...")
+    trend_map = apply_mann_kendall(stack_array)
+
+    # --- 9. Visualizar no Colab ---
+    plt.figure(figsize=(12, 7))
+    plt.title(f"Tendência de Temperatura Inverno (Tau de Kendall) - 2000-2013\nVersão: {nome_saida_final}")
+    # RdBu_r: Escala divergente (Azul = Esfriamento, Vermelho = Aquecimento)
+    im = plt.imshow(trend_map, cmap='RdBu_r', vmin=-1, vmax=1)
+    plt.colorbar(im, label='Tau de Kendall')
+    plt.axis('off')
+    plt.show()
+
+    # --- 10. Salvar resultado em GeoTIFF ---
+    src_meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    output_filename = f"TENDENCIA_MANN_KENDALL_INV_2000_2013_{nome_saida_final}.tif"
+    output_path = os.path.join(base_path, output_filename)
+
+    with rasterio.open(output_path, 'w', **src_meta) as dst:
+        dst.write(trend_map, 1)
+
+    print(f"✅ Arquivo de Tendência de Inverno salvo: {output_filename}")
+
+# --- EXECUÇÃO ---
+# Processa a tendência para a imagem completa
+executar_mann_kendall_inverno("FULL", "FULL")
+
+# Processa a tendência para a zona urbana (vai buscar o arquivo 'URBANA_SEM_MACICOS')
+executar_mann_kendall_inverno("URBANA", "URBANA_SEM_MACICOS")
