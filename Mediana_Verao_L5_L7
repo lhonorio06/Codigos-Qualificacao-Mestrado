@@ -1,0 +1,60 @@
+import rasterio
+import numpy as np
+import os
+import glob
+from google.colab import drive
+
+# 1. Montar o Google Drive
+drive.mount('/content/drive')
+
+# 2. Configurar o caminho da pasta (Ajuste se o nome da pasta for diferente)
+pasta_origem = '/content/drive/MyDrive/LST_RJ_VERAO_2000_2013/'
+
+def processar_mediana_final(tipo_lst):
+    """
+    tipo_lst: 'FULL' ou 'URBANA_SEM_MACICOS'
+    """
+    print(f"--- Iniciando Processamento da Mediana: {tipo_lst} ---")
+
+    # Busca arquivos que sejam BOM OU RESGATE
+    padrao_bom = os.path.join(pasta_origem, f"LST_{tipo_lst}_*_BOM.tif")
+    padrao_resgate = os.path.join(pasta_origem, f"LST_{tipo_lst}_*_RESGATE.tif")
+
+    arquivos = glob.glob(padrao_bom) + glob.glob(padrao_resgate)
+    arquivos.sort() # Organiza por ordem cronológica
+
+    if not arquivos:
+        print(f"Nenhum arquivo encontrado para {tipo_lst} com status BOM ou RESGATE.")
+        return
+
+    pilha_arrays = []
+    meta = None
+
+    for arquivo in arquivos:
+        nome_arq = os.path.basename(arquivo)
+        with rasterio.open(arquivo) as src:
+            img = src.read(1)
+            # Converte valores <= 0 em NaN para não afetar a mediana (ignora áreas sem dados)
+            img = np.where(img <= 0, np.nan, img)
+            pilha_arrays.append(img)
+
+            if meta is None:
+                meta = src.meta.copy()
+            print(f"Incluído na pilha: {nome_arq}")
+
+    # Converte a lista em um array 3D e calcula a mediana ignorando NaNs
+    stack = np.array(pilha_arrays)
+    mediana_climatologica = np.nanmedian(stack, axis=0)
+
+    # Configura os metadados para salvar o arquivo final
+    meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    nome_saida = os.path.join(pasta_origem, f"00_MEDIANA_CONSOLIDADA_2000_2013_{tipo_lst}.tif")
+
+    with rasterio.open(nome_saida, 'w', **meta) as dst:
+        dst.write(mediana_climatologica.astype(rasterio.float32), 1)
+
+    print(f"✅ Sucesso! Mediana {tipo_lst} salva em: {nome_saida}\n")
+
+# 3. Executar para os dois modelos solicitados
+processar_mediana_final("FULL")
+processar_mediana_final("URBANA_SEM_MACICOS")
