@@ -1,0 +1,112 @@
+# --- 1. Instalação de pacotes ---
+!pip install rasterio numpy matplotlib pymannkendall
+
+# --- 2. Bibliotecas ---
+import os
+import numpy as np
+import rasterio
+import matplotlib.pyplot as plt
+import pymannkendall as mk
+from glob import glob
+from google.colab import drive
+
+# --- 3. Montar o Google Drive ---
+drive.mount('/content/drive')
+
+# --- 4. Caminho para as imagens ---
+# Certifique-se de que este caminho aponta para a pasta onde o GEE salvou os arquivos
+base_path = '/content/drive/MyDrive/LST_RJ_VERAO_2000_2013/'
+
+def executar_mann_kendall_completo(tipo_mapa):
+    """
+    tipo_mapa: 'FULL' ou 'URBANA_SEM_MACICOS'
+    """
+    print(f"\n" + "="*50)
+    print(f"INICIANDO ANÁLISE DE TENDÊNCIA: {tipo_mapa}")
+    print("="*50)
+
+    # --- 5. Lista de arquivos filtrando apenas BOM e RESGATE ---
+    # Ignora automaticamente os arquivos marcados como 'CRITICO'
+    padrao_bom = os.path.join(base_path, f"LST_{tipo_mapa}_*_BOM.tif")
+    padrao_resgate = os.path.join(base_path, f"LST_{tipo_mapa}_*_RESGATE.tif")
+
+    tif_files = sorted(glob(padrao_bom) + glob(padrao_resgate))
+
+    if not tif_files:
+        print(f"Erro: Nenhum arquivo encontrado para {tipo_mapa} com padrão BOM/RESGATE.")
+        return
+
+    print(f"Arquivos encontrados ({len(tif_files)}): {[os.path.basename(f) for f in tif_files]}")
+
+    # --- 6. Carregar imagens como array 3D ---
+    stack = []
+    src = None
+
+    for tif in tif_files:
+        with rasterio.open(tif) as src_file:
+            img = src_file.read(1).astype(np.float32)
+            # Tratamento de Nulos: Valores <= 0 ou muito fora da realidade térmica
+            img[img <= 0] = np.nan
+            stack.append(img)
+            if src is None:
+                src = src_file
+                meta = src_file.meta.copy()
+
+    stack_array = np.stack(stack, axis=0) # Shape: (tempo, altura, largura)
+    time_len, rows, cols = stack_array.shape
+
+    # --- 7. Funções de Cálculo ---
+    def calc_kendall_tau(pixel_series):
+        # Remove valores nulos da série temporal do pixel
+        valid_series = pixel_series[~np.isnan(pixel_series)]
+        # Requisito mínimo de anos com dados para o teste ser válido
+        if len(valid_series) < 5:
+            return np.nan
+        try:
+            # Mann-Kendall Original
+            result = mk.original_test(valid_series)
+            return result.Tau
+        except:
+            return np.nan
+
+    def apply_mann_kendall(array_3d):
+        output = np.full((rows, cols), np.nan, dtype=np.float32)
+        print(f"Processando {rows} linhas...")
+
+        for i in range(rows):
+            if i % 100 == 0: print(f"Linha {i} de {rows}...")
+            for j in range(cols):
+                pixel_series = array_3d[:, i, j]
+                # Se o pixel for todo vazio (fora da máscara urbana), pula
+                if np.all(np.isnan(pixel_series)):
+                    continue
+                output[i, j] = calc_kendall_tau(pixel_series)
+        return output
+
+    # --- 8. Rodar análise ---
+    print("Calculando tendência Mann-Kendall pixel a pixel...")
+    trend_map = apply_mann_kendall(stack_array)
+
+    # --- 9. Visualizar no Colab ---
+    plt.figure(figsize=(12, 7))
+    plt.title(f"Tendência de Temperatura (Tau de Kendall) - 2000-2013\nVersão: {tipo_mapa}")
+    # RdBu_r: Vermelho = Aquecimento / Azul = Resfriamento
+    im = plt.imshow(trend_map, cmap='RdBu_r', vmin=-1, vmax=1)
+    plt.colorbar(im, label='Tau de Kendall')
+    plt.axis('off')
+    plt.show()
+
+    # --- 10. Salvar resultado em GeoTIFF ---
+    meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    output_filename = f"TENDENCIA_MANN_KENDALL_2000_2013_{tipo_mapa}.tif"
+    output_path = os.path.join(base_path, output_filename)
+
+    with rasterio.open(output_path, 'w', **meta) as dst:
+        dst.write(trend_map, 1)
+
+    print(f"✅ Arquivo salvo com sucesso: {output_path}")
+
+# --- EXECUÇÃO FINAL ---
+# O código vai rodar uma vez para cada produto, conforme sua exigência
+executar_mann_kendall_completo("FULL")
+executar_mann_kendall_completo("URBANA_SEM_MACICOS")
