@@ -1,0 +1,118 @@
+# --- 1. Instalar pacotes necessários ---
+!pip install rasterio numpy matplotlib scipy
+
+# --- 2. Bibliotecas ---
+import os
+import numpy as np
+import rasterio
+import matplotlib.pyplot as plt
+from glob import glob
+from scipy.stats import linregress
+from google.colab import drive
+
+# --- 3. Montar o Google Drive ---
+drive.mount('/content/drive')
+
+# --- 4. Configurações de Caminho (Pasta de Inverno) ---
+base_path = '/content/drive/MyDrive/LST_RJ_Inverno_2000_2013/'
+
+def executar_sen_slope_inverno(termo_busca, nome_saida_final):
+    """
+    termo_busca: 'FULL' ou 'URBANA'
+    nome_saida_final: Sufixo para o arquivo salvo
+    """
+    print(f"\n" + "="*60)
+    print(f"INICIANDO SEN'S SLOPE INVERNO (°C/ano): {nome_saida_final}")
+    print("="*60)
+
+    # --- 5. Lista arquivos com busca flexível (BOM e RESGATE) ---
+    todos_arquivos = glob(os.path.join(base_path, "*.tif"))
+
+    tif_files = []
+    for f in todos_arquivos:
+        nome_f = os.path.basename(f).upper()
+        if (termo_busca.upper() in nome_f) and ("BOM" in nome_f or "RESGATE" in nome_f):
+            tif_files.append(f)
+
+    tif_files = sorted(tif_files)
+
+    if not tif_files:
+        print(f"❌ Erro: Nenhum arquivo de Inverno encontrado para {termo_busca}.")
+        return
+
+    # --- 6. Extrair anos reais dos nomes dos arquivos ---
+    years_list = []
+    for f in tif_files:
+        nome = os.path.basename(f)
+        # Pega o primeiro número de 4 dígitos encontrado no nome
+        import re
+        ano = int(re.search(r'\d{4}', nome).group())
+        years_list.append(ano)
+
+    years = np.array(years_list)
+    print(f"Anos detectados na série de Inverno: {years}")
+
+    # --- 7. Carregar dados em um array 3D ---
+    stack = []
+    src_meta = None
+
+    for tif in tif_files:
+        with rasterio.open(tif) as src:
+            img = src.read(1).astype(np.float32)
+            img[img <= 0] = np.nan
+            stack.append(img)
+            if src_meta is None:
+                src_meta = src.meta.copy()
+
+    stack_array = np.stack(stack, axis=0)
+    time_len, rows, cols = stack_array.shape
+
+    # --- 8. Função para calcular a Inclinação (Slope) ---
+    def calculate_slope(pixel_series, years_array):
+        mask = ~np.isnan(pixel_series)
+        x = years_array[mask]
+        y = pixel_series[mask]
+
+        if len(y) < 5: # Mínimo de 5 anos para consistência
+            return np.nan
+
+        slope, _, _, _, _ = linregress(x, y)
+        return slope
+
+    # --- 9. Aplicar em cada pixel ---
+    print(f"Processando {rows} linhas de pixels...")
+    sen_slope_result = np.full((rows, cols), np.nan, dtype=np.float32)
+
+    for i in range(rows):
+        if i % 100 == 0: print(f"Linha {i} de {rows}...")
+        for j in range(cols):
+            pixel_series = stack_array[:, i, j]
+            if np.all(np.isnan(pixel_series)):
+                continue
+            sen_slope_result[i, j] = calculate_slope(pixel_series, years)
+
+    # --- 10. Visualizar o resultado ---
+    plt.figure(figsize=(10, 6))
+    plt.title(f"Sen's Slope Inverno (°C/ano) - 2000–2013\nVersão: {nome_saida_final}")
+    # RdYlBu_r: Vermelho (Aquecimento) | Azul (Resfriamento)
+    im = plt.imshow(sen_slope_result, cmap='RdYlBu_r', vmin=-0.5, vmax=0.5)
+    plt.colorbar(im, label='Variação Térmica por Ano (°C/ano)')
+    plt.axis('off')
+    plt.show()
+
+    # --- 11. Salvar GeoTIFF ---
+    src_meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    output_filename = f"TENDENCIA_SEN_SLOPE_INV_2000_2013_{nome_saida_final}.tif"
+    output_path = os.path.join(base_path, output_filename)
+
+    with rasterio.open(output_path, 'w', **src_meta) as dst:
+        dst.write(sen_slope_result, 1)
+
+    print(f"✅ Arquivo de Slope de Inverno salvo: {output_filename}")
+
+# --- EXECUÇÃO ---
+# Calcula para a imagem completa
+executar_sen_slope_inverno("FULL", "FULL")
+
+# Calcula para a zona urbana
+executar_sen_slope_inverno("URBANA", "URBANA_SEM_MACICOS")
