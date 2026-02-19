@@ -1,0 +1,110 @@
+# --- 1. Instalar pacotes necessários ---
+!pip install rasterio numpy matplotlib scipy
+
+# --- 2. Bibliotecas ---
+import os
+import numpy as np
+import rasterio
+import matplotlib.pyplot as plt
+from glob import glob
+from scipy.stats import linregress
+from google.colab import drive
+
+# --- 3. Montar o Google Drive ---
+drive.mount('/content/drive')
+
+# --- 4. Configurações de Caminho ---
+# Pasta onde estão os arquivos do período 2000-2013
+base_path = '/content/drive/MyDrive/LST_RJ_VERAO_2000_2013/'
+
+def executar_sen_slope_completo(tipo_mapa):
+    """
+    tipo_mapa: 'FULL' ou 'URBANA_SEM_MACICOS'
+    """
+    print(f"\n" + "="*50)
+    print(f"INICIANDO CÁLCULO DE SEN'S SLOPE (°C/ano): {tipo_mapa}")
+    print("="*50)
+
+    # --- 5. Lista arquivos filtrando apenas BOM e RESGATE ---
+    padrao_bom = os.path.join(base_path, f"LST_{tipo_mapa}_*_BOM.tif")
+    padrao_resgate = os.path.join(base_path, f"LST_{tipo_mapa}_*_RESGATE.tif")
+    tif_files = sorted(glob(padrao_bom) + glob(padrao_resgate))
+
+    if not tif_files:
+        print(f"Erro: Nenhum arquivo encontrado para {tipo_mapa} com padrão BOM/RESGATE.")
+        return
+
+    # --- 6. Extrair anos dos nomes dos arquivos para o eixo X ---
+    # Assume que o ano está no nome do arquivo (ex: ..._2005_...)
+    years_list = []
+    for f in tif_files:
+        nome = os.path.basename(f)
+        # Busca o número de 4 dígitos que representa o ano
+        ano = int(''.join(filter(str.isdigit, nome))[:4])
+        years_list.append(ano)
+
+    years = np.array(years_list)
+    print(f"Anos detectados na série: {years}")
+
+    # --- 7. Carregar dados em um array 3D ---
+    stack = []
+    src_meta = None
+
+    for tif in tif_files:
+        with rasterio.open(tif) as src:
+            img = src.read(1).astype(np.float32)
+            img[img <= 0] = np.nan # Tratamento de NoData
+            stack.append(img)
+            if src_meta is None:
+                src_meta = src.meta.copy()
+
+    stack_array = np.stack(stack, axis=0) # (tempo, altura, largura)
+    time_len, rows, cols = stack_array.shape
+
+    # --- 8. Função para calcular a Inclinação (Slope) ---
+    def calculate_slope(pixel_series, years_array):
+        mask = ~np.isnan(pixel_series)
+        x = years_array[mask]
+        y = pixel_series[mask]
+
+        # Mínimo de 5 anos com dados para uma tendência robusta no mestrado
+        if len(y) < 5:
+            return np.nan
+
+        # Linregress fornece o slope (estimativa de Sen's Slope para séries lineares)
+        slope, _, _, _, _ = linregress(x, y)
+        return slope
+
+    # --- 9. Aplicar em cada pixel ---
+    print(f"Processando {rows} linhas de pixels...")
+    sen_slope_result = np.full((rows, cols), np.nan, dtype=np.float32)
+
+    for i in range(rows):
+        if i % 100 == 0: print(f"Linha {i}...")
+        for j in range(cols):
+            pixel_series = stack_array[:, i, j]
+            if np.all(np.isnan(pixel_series)):
+                continue
+            sen_slope_result[i, j] = calculate_slope(pixel_series, years)
+
+    # --- 10. Visualizar o resultado ---
+    plt.figure(figsize=(10, 6))
+    plt.title(f"Sen's Slope (°C/ano) - Verão 2000–2013\nVersão: {tipo_mapa}")
+    # RdYlBu_r: Vermelho (Quente/Aumento) para Azul (Frio/Diminuição)
+    im = plt.imshow(sen_slope_result, cmap='RdYlBu_r', vmin=-0.5, vmax=0.5)
+    plt.colorbar(im, label='Variação de Temperatura (°C/ano)')
+    plt.axis('off')
+    plt.show()
+
+    # --- 11. Salvar GeoTIFF ---
+    src_meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    output_path = os.path.join(base_path, f'TENDENCIA_SEN_SLOPE_2000_2013_{tipo_mapa}.tif')
+
+    with rasterio.open(output_path, 'w', **src_meta) as dst:
+        dst.write(sen_slope_result, 1)
+
+    print(f"✅ Arquivo salvo: {output_path}")
+
+# --- Execução ---
+executar_sen_slope_completo("FULL")
+executar_sen_slope_completo("URBANA_SEM_MACICOS")
