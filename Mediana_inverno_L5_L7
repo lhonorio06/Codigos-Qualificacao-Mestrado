@@ -1,0 +1,69 @@
+import rasterio
+import numpy as np
+import os
+import glob
+from google.colab import drive
+
+# 1. Montar o Drive
+drive.mount('/content/drive')
+
+# 2. Caminho da pasta (Ajustado conforme o nome que aparece no seu Drive)
+pasta_origem = '/content/drive/MyDrive/LST_RJ_Inverno_2000_2013/'
+
+def processar_mediana_inverno_final(termo_busca, nome_produto):
+    print(f"--- Procurando arquivos para: {termo_busca} ---")
+
+    # 1. Pega TODOS os arquivos .tif da pasta
+    todos_arquivos = glob.glob(os.path.join(pasta_origem, "*.tif"))
+
+    if not todos_arquivos:
+        print(f"⚠️ A pasta está vazia ou o caminho está errado: {pasta_origem}")
+        return
+
+    # 2. Filtra manualmente (Ignora maiúsculas/minúsculas)
+    arquivos_selecionados = []
+    for f in todos_arquivos:
+        nome = os.path.basename(f).upper() # Converte para maiúsculo para comparar
+        # Verifica se tem 'BOM' ou 'RESGATE' E se tem o termo de busca (FULL ou URBANA)
+        if (termo_busca.upper() in nome) and ("BOM" in nome or "RESGATE" in nome):
+            arquivos_selecionados.append(f)
+
+    arquivos_selecionados.sort()
+
+    if not arquivos_selecionados:
+        print(f"❌ Nenhum arquivo encontrado com o termo '{termo_busca}' e status BOM/RESGATE.")
+        return
+
+    print(f"✅ Encontrados {len(arquivos_selecionados)} arquivos.")
+
+    pilha_arrays = []
+    meta = None
+
+    for arquivo in arquivos_selecionados:
+        nome_arq = os.path.basename(arquivo)
+        with rasterio.open(arquivo) as src:
+            img = src.read(1).astype(np.float32)
+            img[img <= 0] = np.nan # Define NoData
+            pilha_arrays.append(img)
+            if meta is None: meta = src.meta.copy()
+            print(f"   + Adicionando: {nome_arq}")
+
+    # 3. Cálculo da Mediana
+    stack = np.array(pilha_arrays)
+    mediana = np.nanmedian(stack, axis=0)
+
+    # 4. Salvar Produto Final
+    meta.update(dtype=rasterio.float32, count=1, nodata=np.nan)
+    nome_saida = os.path.join(pasta_origem, f"00_MEDIANA_CONSOLIDADA_INV_{nome_produto}.tif")
+
+    with rasterio.open(nome_saida, 'w', **meta) as dst:
+        dst.write(mediana.astype(rasterio.float32), 1)
+
+    print(f"🚀 SUCESSO! Salvo como: {os.path.basename(nome_saida)}\n")
+
+# --- EXECUÇÃO ---
+# Procuro por "FULL" e salvo como FULL
+processar_mediana_inverno_final("FULL", "FULL")
+
+# Procuro por "URBANA" (que vai achar URBANA_SEM_MACICOS) e salvo com nome limpo
+processar_mediana_inverno_final("URBANA", "URBANA_SEM_MACICOS")
