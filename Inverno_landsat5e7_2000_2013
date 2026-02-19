@@ -1,0 +1,118 @@
+// ========================================================================= //
+//   VERSÃO MESTRE: INVERNO (2000-2013) - RESGATE DE ANOS CRÍTICOS           //
+// ========================================================================= //
+
+var assetIdAPs = "projects/ee-lhonorio97/assets/AP"; 
+var aoi = ee.FeatureCollection(assetIdAPs).geometry(); 
+var pastaDrive = "LST_RJ_INVERNO_2000_2013"; 
+
+Map.centerObject(aoi, 10);
+
+// --- 1. FUNÇÕES DE CÁLCULO --- 
+
+function processarInverno(image) {
+  var qa = image.select("QA_PIXEL");
+  var mask = qa.bitwiseAnd(1 << 1).eq(0).and(qa.bitwiseAnd(1 << 2).eq(0))
+            .and(qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 4).eq(0)));
+            
+  var Tb = image.select("ST_B6").multiply(0.00341802).add(149.0);
+  var ndvi = image.normalizedDifference(["SR_B4", "SR_B3"]).rename("NDVI");
+  
+  // Máscara de Maciços: NDVI < 0.6 para focar na área urbana
+  var mascaraMacicos = ndvi.lt(0.6); 
+  
+  var em = ndvi.expression("(ndvi < 0.2) ? 0.97 : (ndvi > 0.5) ? 0.99 : 0.98", {"ndvi": ndvi}).rename("EM");
+  var lst = Tb.expression("(Tb / (1 + (10.9 * Tb / 14388) * log(em))) - 273.15", {"Tb": Tb, "em": em}).rename("LST");
+  
+  var lstFinal = lst.updateMask(mask).clip(aoi);
+  var lstUrbana = lstFinal.updateMask(mascaraMacicos);
+  
+  return lstFinal.addBands(lstUrbana.rename("LST_URBANO")).copyProperties(image, ["system:time_start"]);
+}
+
+// --- 2. CONFIGURAÇÃO DOS ANOS --- 
+var anosArray = [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013];
+
+// ATUALIZADO: Anos que você identificou como ruins no inverno
+var anosRuinsInverno = [2000, 2003, 2011, 2013]; 
+
+// --- 3. LOOP DE PROCESSAMENTO --- 
+var listaParaTabelaStatus = [];
+var listaParaBoxplot = [];
+
+anosArray.forEach(function(ano) {
+  var d1, d2, status;
+  
+  // Lógica de Janela Temporal baseada na sua inspeção visual
+  if (anosRuinsInverno.indexOf(ano) !== -1) {
+    // Janela de Resgate Inverno: Maio a Outubro (Para capturar dias limpos)
+    d1 = ee.Date.fromYMD(ano, 5, 1); 
+    d2 = ee.Date.fromYMD(ano, 10, 31);
+    status = "RESGATE";
+  } else {
+    // Janela Padrão Inverno: 21 de Junho a 22 de Setembro
+    d1 = ee.Date.fromYMD(ano, 6, 21);
+    d2 = ee.Date.fromYMD(ano, 9, 22);
+    status = "BOM";
+  }
+  
+  var col = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2").filterBounds(aoi).filterDate(d1, d2)
+      .merge(ee.ImageCollection("LANDSAT/LE07/C02/T1_L2").filterBounds(aoi).filterDate(d1, d2))
+      .filter(ee.Filter.lt("CLOUD_COVER", 60)); // Aumentei levemente a tolerância para o resgate
+
+  // 3.1 RGB para Inspeção
+  var rgb = col.map(function(img){ return img.multiply(0.0000275).add(-0.2); }).median().clip(aoi);
+  Map.addLayer(rgb, {bands:['SR_B3','SR_B2','SR_B1'], min:0, max:0.3}, "RGB_INV_" + ano + "_" + status, false);
+
+  // 3.2 Processamento LST
+  var imgProcessada = col.map(processarInverno).median();
+  var lstUrbana = imgProcessada.select("LST_URBANO");
+
+  // 3.3 Exportações (RGB, FULL, URBANA)
+  Export.image.toDrive({
+    image: rgb.visualize({bands:['SR_B3','SR_B2','SR_B1'], min:0, max:0.3}),
+    description: "RGB_INV_JUSTIF_" + ano + "_" + status,
+    folder: pastaDrive, region: aoi, scale: 30
+  });
+
+  Export.image.toDrive({
+    image: imgProcessada.select("LST").toFloat(),
+    description: "LST_INV_FULL_" + ano + "_" + status,
+    folder: pastaDrive, region: aoi, scale: 30
+  });
+
+  Export.image.toDrive({
+    image: lstUrbana.toFloat(),
+    description: "LST_INV_URBANA_SEM_MAC_" + ano + "_" + status,
+    folder: pastaDrive, region: aoi, scale: 30
+  });
+
+  // 3.4 Estatística para Boxplot
+  var statsAP = lstUrbana.reduceRegions({
+    collection: ee.FeatureCollection(assetIdAPs),
+    reducer: ee.Reducer.median().combine({reducer2: ee.Reducer.minMax(), sharedInputs: true}),
+    scale: 30
+  }).map(function(f) { return f.set('ano', ano).set('estacao', 'inverno').set('status', status); });
+  
+  listaParaBoxplot.push(statsAP);
+
+  // 3.5 Metadados
+  var datas = col.aggregate_array("system:time_start").map(function(d) { return ee.Date(d).format("YYYY-MM-dd") });
+  listaParaTabelaStatus.push(ee.Feature(null, { 'Ano': ano, 'Status': status, 'Qtd': col.size(), 'Datas': datas }));
+});
+
+// --- 4. EXPORTAÇÃO DAS TABELAS --- 
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection(listaParaTabelaStatus),
+  description: "TABELA_DATAS_INVERNO_2000_2013",
+  folder: pastaDrive, fileFormat: "CSV"
+});
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection(listaParaBoxplot).flatten(),
+  description: "DADOS_BOXPLOT_INVERNO_2000_2013",
+  folder: pastaDrive, fileFormat: "CSV"
+});
+
+print("Inverno atualizado com resgate para 2000, 2003, 2011 e 2013!");
